@@ -778,3 +778,159 @@ class BlendAlphaCrossover(BaseCrossover):
                 ]
             )
         return msgs
+
+
+class SingleArithmeticCrossover(BaseCrossover):
+    """Single‐point arithmetic crossover for continuous problems.
+
+    Choose a single random gene index k and, with probability xover_probability,
+    set offspring[k] = (parent1[k] + parent2[k]) / 2. All other genes are copied from the parents.
+    """
+
+    @property
+    def provided_topics(self) -> dict[int, Sequence[CrossoverMessageTopics]]:
+        return {
+            0: [],
+            1: [CrossoverMessageTopics.XOVER_PROBABILITY],
+            2: [
+                CrossoverMessageTopics.XOVER_PROBABILITY,
+                CrossoverMessageTopics.PARENTS,
+                CrossoverMessageTopics.OFFSPRINGS,
+            ],
+        }
+
+    @property
+    def interested_topics(self):
+        return []
+
+    def __init__(
+        self,
+        *,
+        problem: Problem,
+        seed: int = 0,
+        xover_probability: float = 1.0,
+        **kwargs,
+    ):
+        """Initialize the single arithmetic crossover operator.
+
+        Args:
+            problem (Problem): the problem object.
+            seed (int): the seed used in the random number generator for choosing the crossover point.
+            xover_probability (float, optional): the crossover probability parameter.
+                Ranges between 0 and 1.0. Defaults to 1.0.
+            kwargs: Additional keyword arguments. These are passed to the Subscriber class. At the very least, the
+                publisher must be passed. See the Subscriber class for more information.
+        """
+        super().__init__(problem=problem, **kwargs)
+
+        if problem.variable_domain is not VariableDomainTypeEnum.continuous:
+            raise ValueError("SingleArithmeticCrossover only works on continuous problems.")
+        if not 0 <= xover_probability <= 1:
+            raise ValueError("Crossover probability must be in [0,1].")
+
+        self.xover_probability = xover_probability
+        self.seed = seed
+
+        self.parent_population: pl.DataFrame | None = None
+        self.offspring_population: pl.DataFrame | None = None
+
+    def do(
+        self,
+        *,
+        population: pl.DataFrame,
+        to_mate: list[int] | None = None,
+    ) -> pl.DataFrame:
+        """
+        Perform single‐point arithmetic crossover.
+
+        Args:
+            population (pl.DataFrame): full population (only the decision columns are used).
+            to_mate (list[int] | None): indices of individuals to mate; if None, mate all.
+
+        Returns:
+            pl.DataFrame: offspring decision vectors (same schema as parents).
+        """
+        self.parent_population = population
+        pop_size = population.shape[0]
+        num_vars = len(self.variable_symbols)
+
+        # extract decision vars
+        parents = population[self.variable_symbols].to_numpy()
+
+        # select who to mate
+        if to_mate is None:
+            mating_indices = list(range(pop_size))
+            shuffle(mating_indices)
+        else:
+            mating_indices = copy.copy(to_mate)
+
+        mating_pop_size = len(mating_indices)
+        original_pop_size = mating_pop_size
+
+        if mating_pop_size % 2 == 1:
+            mating_indices.append(mating_indices[0])
+            mating_pop_size += 1
+
+        mating_pool = parents[mating_indices, :]
+
+        parents1 = mating_pool[0::2, :]
+        parents2 = mating_pool[1::2, :]
+
+        offspring1 = parents1.copy()
+        offspring2 = parents2.copy()
+
+        rng = np.random.default_rng(self.seed)
+
+        mask = rng.random(mating_pop_size // 2) <= self.xover_probability
+        gene_pos = rng.integers(0, num_vars, size=mating_pop_size // 2)
+        avg = 0.5 * (
+                parents1[np.arange(mating_pop_size // 2), gene_pos]
+                + parents2[np.arange(mating_pop_size // 2), gene_pos]
+        )
+
+        offspring1[mask, gene_pos[mask]] = avg[mask]
+        offspring2[mask, gene_pos[mask]] = avg[mask]
+
+        offspring = np.vstack((offspring1, offspring2))
+        if original_pop_size % 2 == 1:
+            offspring = offspring[:-1, :]
+
+        self.offspring_population = (
+            pl.from_numpy(offspring, schema=self.variable_symbols)
+            .select(pl.all().cast(pl.Float64))
+        )
+        self.notify()
+        return self.offspring_population
+
+    def update(self, *_, **__):
+        """Nothing to update each generation."""
+        pass
+
+    def state(self) -> Sequence[Message]:
+        if self.parent_population is None:
+            return []
+        msgs: list[Message] = []
+        if self.verbosity >= 1:
+            msgs.append(
+                FloatMessage(
+                    topic=CrossoverMessageTopics.XOVER_PROBABILITY,
+                    source=self.__class__.__name__,
+                    value=self.xover_probability,
+                )
+            )
+        if self.verbosity >= 2:
+            msgs.extend(
+                [
+                    PolarsDataFrameMessage(
+                        topic=CrossoverMessageTopics.PARENTS,
+                        source=self.__class__.__name__,
+                        value=self.parent_population,
+                    ),
+                    PolarsDataFrameMessage(
+                        topic=CrossoverMessageTopics.OFFSPRINGS,
+                        source=self.__class__.__name__,
+                        value=self.offspring_population,
+                    ),
+                ]
+            )
+        return msgs

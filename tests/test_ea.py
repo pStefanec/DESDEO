@@ -15,7 +15,7 @@ from desdeo.emo.operators.crossover import (
     SimulatedBinaryCrossover,
     SinglePointBinaryCrossover,
     UniformIntegerCrossover,
-    UniformMixedIntegerCrossover,
+    UniformMixedIntegerCrossover, SingleArithmeticCrossover,
 )
 from desdeo.emo.operators.evaluator import EMOEvaluator
 from desdeo.emo.operators.generator import (
@@ -731,7 +731,43 @@ def test_blend_alpha_crossover():
 
     population, outputs = generator.do()
 
-    # pick a custom mating order (odd-length to test padding)
+    # pick a custom mating order
+    to_mate = [0, 9, 1, 8, 2]
+    offspring = crossover.do(population=population, to_mate=to_mate)
+
+    assert offspring.shape == (len(to_mate), num_vars)
+    # offspring must differ from parents
+    with npt.assert_raises(AssertionError):
+        npt.assert_allclose(population, offspring)
+
+
+@pytest.mark.ea
+def test_single_arithmetic_crossover():
+    """Test whether the single‐point arithmetic crossover operator works as intended."""
+    publisher = Publisher()
+
+    problem = simple_test_problem()
+    # must be continuous problem
+    assert problem.variable_domain is VariableDomainTypeEnum.continuous
+
+    crossover = SingleArithmeticCrossover(
+        problem=problem,
+        publisher=publisher,
+    )
+    num_vars = len(crossover.variable_symbols)
+
+    # generate a random population
+    evaluator = EMOEvaluator(problem=problem, publisher=publisher)
+    generator = RandomGenerator(
+        problem=problem,
+        evaluator=evaluator,
+        publisher=publisher,
+        n_points=10,
+        seed=0,
+    )
+    population, outputs = generator.do()
+
+    # custom mating list
     to_mate = [0, 9, 1, 8, 2]
     offspring = crossover.do(population=population, to_mate=to_mate)
 
