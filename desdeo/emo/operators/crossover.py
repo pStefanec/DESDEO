@@ -934,3 +934,154 @@ class SingleArithmeticCrossover(BaseCrossover):
                 ]
             )
         return msgs
+
+
+class LocalCrossover(Subscriber):
+    """Local arithmetic crossover for continuous problems.
+
+    Same as whole‐arithmetic crossover, except that at each gene position
+    the blending coefficient α∼U(0,1) is independently sampled.
+    """
+
+    @property
+    def provided_topics(self) -> dict[int, Sequence[CrossoverMessageTopics]]:
+        return {
+            0: [],
+            1: [CrossoverMessageTopics.XOVER_PROBABILITY],
+            2: [
+                CrossoverMessageTopics.XOVER_PROBABILITY,
+                CrossoverMessageTopics.PARENTS,
+                CrossoverMessageTopics.OFFSPRINGS,
+            ],
+        }
+
+    @property
+    def interested_topics(self):
+        return []
+
+    def __init__(
+        self,
+        *,
+        problem: Problem,
+        seed: int = 0,
+        xover_probability: float = 1.0,
+        **kwargs,
+    ):
+        """Initialize the local crossover operator.
+
+        Args:
+            problem (Problem): the problem object.
+            seed (int): seed for RNG.
+            xover_probability (float, optional): pair‐wise crossover probability
+                in [0,1]. Defaults to 1.0.
+            kwargs: passed to Subscriber (e.g. publisher).
+        """
+        super().__init__(**kwargs)
+        if problem.variable_domain is not VariableDomainTypeEnum.continuous:
+            raise ValueError("LocalCrossover only works on continuous problems.")
+        if not 0 <= xover_probability <= 1:
+            raise ValueError("xover_probability must be in [0,1].")
+
+        self.xover_probability = xover_probability
+        self.seed = seed
+        self.problem = problem
+        self.variable_symbols = [v.symbol for v in problem.get_flattened_variables()]
+
+        self.parent_population: pl.DataFrame | None = None
+        self.offspring_population: pl.DataFrame | None = None
+
+    def do(
+        self,
+        *,
+        population: pl.DataFrame,
+        to_mate: list[int] | None = None,
+    ) -> pl.DataFrame:
+        """
+        Perform local crossover.
+
+        Args:
+            population (pl.DataFrame): full population (only decision cols used).
+            to_mate (list[int] | None): indices to mate; if None, all are mated.
+
+        Returns:
+            pl.DataFrame: offspring decision vectors (same schema).
+        """
+        self.parent_population = population
+        pop_size = population.shape[0]
+        num_vars = len(self.variable_symbols)
+
+        parents = population[self.variable_symbols].to_numpy()
+
+        # decide who to mate
+        if to_mate is None:
+            mating_indices = list(range(pop_size))
+            shuffle(mating_indices)
+        else:
+            mating_indices = copy.copy(to_mate)
+
+        m = len(mating_indices)
+        original_m = m
+        if m % 2 != 0:
+            mating_indices.append(mating_indices[0])
+            m += 1
+
+        mating_pool = parents[mating_indices, :]
+        half = m // 2
+        p1 = mating_pool[0::2, :]
+        p2 = mating_pool[1::2, :]
+
+        rng = np.random.default_rng(self.seed)
+        do_xover = rng.random(half) <= self.xover_probability
+
+        alpha = rng.random((half, num_vars))
+
+        # local blend: α * p1 + (1−α) * p2
+        child1 = alpha * p1 + (1 - alpha) * p2
+        child2 = alpha * p2 + (1 - alpha) * p1
+
+        # for pairs that do not cross, copy parents
+        child1[~do_xover, :] = p1[~do_xover, :]
+        child2[~do_xover, :] = p2[~do_xover, :]
+
+        # reassemble and drop padding if needed
+        offspring = np.vstack((child1, child2))
+        if original_m % 2 != 0:
+            offspring = offspring[:-1, :]
+
+        self.offspring_population = (
+            pl.from_numpy(offspring, schema=self.variable_symbols)
+            .select(pl.all().cast(pl.Float64))
+        )
+        self.notify()
+        return self.offspring_population
+
+    def update(self, *_, **__):
+        """Nothing to update."""
+        pass
+
+    def state(self) -> Sequence[Message]:
+        if self.parent_population is None:
+            return []
+        msgs: list[Message] = []
+        if self.verbosity >= 1:
+            msgs.append(
+                FloatMessage(
+                    topic=CrossoverMessageTopics.XOVER_PROBABILITY,
+                    source=self.__class__.__name__,
+                    value=self.xover_probability,
+                )
+            )
+        if self.verbosity >= 2:
+            msgs.extend([
+                PolarsDataFrameMessage(
+                    topic=CrossoverMessageTopics.PARENTS,
+                    source=self.__class__.__name__,
+                    value=self.parent_population,
+                ),
+                PolarsDataFrameMessage(
+                    topic=CrossoverMessageTopics.OFFSPRINGS,
+                    source=self.__class__.__name__,
+                    value=self.offspring_population,
+                ),
+            ])
+        return msgs
